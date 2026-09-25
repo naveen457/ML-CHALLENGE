@@ -1,0 +1,25 @@
+# Virtual environment
+.venv/
+venv/
+ENV/
+
+# Python bytecode & cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Dataset files (large TSVs, >2.5 GB)
+dataset/
+student_resource/dataset/
+*.tsv
+__MACOSX/
+.DS_Store
+
+# Temporary outputs & logs
+models/
+output/
+student_resource/output/candidate_pairs.tsv
+
+.agents/
+AGENTS.md

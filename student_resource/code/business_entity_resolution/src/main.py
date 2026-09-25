@@ -74,6 +74,7 @@ def run_pipeline(
     # 1. Initialize candidate blocker and matcher
     blocker = InvertedIndexBlocker(max_candidates_per_entity=max_candidates)
     model = EntityMatchingModel(threshold=threshold)
+    print(f"Active Match Decision Threshold: {model.threshold:.2f}")
 
     # 2. Index Source 2 and Source 3
     source2_path = os.path.join(data_dir, f"{prefix}_source2.tsv")
@@ -135,6 +136,54 @@ def run_pipeline(
         # Skip header
         header_line = s1_f.readline()
 
+        BATCH_SIZE = 2500
+        batch_items = []
+
+        def flush_batch(items):
+            nonlocal total_candidates, total_matches, s1_count
+            if not items:
+                return
+
+            all_feats = []
+            entity_cand_slices = []
+
+            for e_id, core_name, full_name, clean_addr, c_country in items:
+                candidates = blocker.query(core_name, full_name, clean_addr, c_country)
+                cand_ids = [c[0] for c in candidates]
+                total_candidates += len(cand_ids)
+                cand_f.write(f"{e_id}\t{','.join(cand_ids)}\n")
+
+                start_idx = len(all_feats)
+                for cand_id, cand_core, cand_full, cand_addr in candidates:
+                    feats = compute_pairwise_features(
+                        s1_name_core=core_name,
+                        s1_name_full=full_name,
+                        s1_addr=clean_addr,
+                        s23_name_core=cand_core,
+                        s23_name_full=cand_full,
+                        s23_addr=cand_addr
+                    )
+                    all_feats.append(feats)
+                end_idx = len(all_feats)
+                entity_cand_slices.append((e_id, candidates, start_idx, end_idx))
+
+            # Batch score all candidates in one C++ matrix call
+            all_scores = model.score_batch(all_feats)
+
+            for e_id, candidates, start_idx, end_idx in entity_cand_slices:
+                cand_scores = all_scores[start_idx:end_idx]
+                scored = []
+                for (cand_id, _, _, _), sc in zip(candidates, cand_scores):
+                    if sc >= model.threshold:
+                        scored.append((sc, cand_id))
+                scored.sort(key=lambda x: x[0], reverse=True)
+                matched_ids = [cid for _, cid in scored[:5]]
+                total_matches += len(matched_ids)
+                match_f.write(f"{e_id}\t{','.join(matched_ids)}\n")
+                s1_count += 1
+                if s1_count % 100000 == 0:
+                    print(f"  Processed {s1_count:,} S1 entities ({time.time() - t0:.1f}s) | Matches found: {total_matches:,}")
+
         for line in s1_f:
             parts = line.rstrip('\r\n').split('\t')
             if not parts or not parts[0]:
@@ -149,37 +198,16 @@ def run_pipeline(
             core_name, full_name = clean_business_name(b_name)
             clean_addr = clean_address(b_addr)
 
-            # Query candidate blocker
-            candidates = blocker.query(core_name, full_name, clean_addr, c_country)
-            cand_ids = [c[0] for c in candidates]
-            total_candidates += len(cand_ids)
+            batch_items.append((e_id, core_name, full_name, clean_addr, c_country))
+            if len(batch_items) >= BATCH_SIZE:
+                flush_batch(batch_items)
+                batch_items = []
 
-            # Candidate pairs row
-            cand_f.write(f"{e_id}\t{','.join(cand_ids)}\n")
-
-            # Score each candidate
-            matched_ids = []
-            for cand_id, cand_core, cand_full, cand_addr in candidates:
-                feats = compute_pairwise_features(
-                    s1_name_core=core_name,
-                    s1_name_full=full_name,
-                    s1_addr=clean_addr,
-                    s23_name_core=cand_core,
-                    s23_name_full=cand_full,
-                    s23_addr=cand_addr
-                )
-                if model.is_match(feats):
-                    matched_ids.append(cand_id)
-
-            total_matches += len(matched_ids)
-            # Matching results row
-            match_f.write(f"{e_id}\t{','.join(matched_ids)}\n")
-
-            s1_count += 1
-            if s1_count % 100000 == 0:
-                print(f"  Processed {s1_count:,} S1 entities ({time.time() - t0:.1f}s) | Matches found: {total_matches:,}")
             if limit and s1_count >= limit:
                 break
+
+        if batch_items:
+            flush_batch(batch_items)
 
     print("\n" + "=" * 70)
     print(f"Pipeline completed successfully in {time.time() - t0:.1f}s!")

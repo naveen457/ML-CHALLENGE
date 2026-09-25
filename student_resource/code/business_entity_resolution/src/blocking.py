@@ -42,11 +42,11 @@ class InvertedIndexBlocker:
             if len(tok) >= 6:
                 self.country_indices[country][tok[:5]].append(idx)
                 
-        # Index distinctive address numbers (e.g. street numbers, PIN codes)
+        # Index distinctive postal codes (length 4-6 digits)
         if address:
-            addr_nums = [n for n in address.split() if n.isdigit() and len(n) >= 2]
+            addr_nums = [n for n in address.split() if n.isdigit() and 4 <= len(n) <= 6]
             for num in addr_nums[:2]:
-                self.country_indices[country][f"num_{num}"].append(idx)
+                self.country_indices[country][f"pin_{num}"].append(idx)
 
     def prune_high_frequency_tokens(self):
         """Prune inverted lists that are too long to prevent combinatorial explosion."""
@@ -75,11 +75,11 @@ class InvertedIndexBlocker:
             if len(tok) >= 6:
                 tokens.append(tok[:5])
 
-        # Add address numbers
+        # Add postal codes
         if address:
-            addr_nums = [n for n in address.split() if n.isdigit() and len(n) >= 2]
+            addr_nums = [n for n in address.split() if n.isdigit() and 4 <= len(n) <= 6]
             for num in addr_nums[:2]:
-                tokens.append(f"num_{num}")
+                tokens.append(f"pin_{num}")
             
         hit_counts: Dict[int, int] = Counter()
         for tok in tokens:

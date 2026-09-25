@@ -1,8 +1,9 @@
 import re
+import unicodedata
 from typing import Dict, Any, Set, List
 
 try:
-    from rapidfuzz import fuzz, distance
+    from rapidfuzz import fuzz
     HAS_RAPIDFUZZ = True
 except ImportError:
     HAS_RAPIDFUZZ = False
@@ -44,8 +45,7 @@ def compute_pairwise_features(
     s23_addr: str
 ) -> Dict[str, float]:
     """
-    Computes a feature vector for a candidate pair (S1, S2/S3).
-    All text inputs should already be preprocessed/cleaned.
+    Computes a comprehensive, high-discrimination feature vector for (S1, S2/S3) pair.
     """
     s1_tokens = s1_name_core.split()
     s23_tokens = s23_name_core.split()
@@ -56,40 +56,48 @@ def compute_pairwise_features(
     name_jaccard = jaccard_similarity(s1_token_set, s23_token_set)
     name_overlap = token_overlap_ratio(s1_tokens, s23_tokens)
     
-    # Character 3-gram similarity (catches typos, inflections)
+    # Character 3-gram similarity
     s1_ngrams = get_char_ngrams(s1_name_core, 3)
     s23_ngrams = get_char_ngrams(s23_name_core, 3)
     name_ngram_jaccard = jaccard_similarity(s1_ngrams, s23_ngrams)
     
+    # Exact and concatenation matches
     exact_core_match = 1.0 if s1_name_core and s1_name_core == s23_name_core else 0.0
     exact_full_match = 1.0 if s1_name_full and s1_name_full == s23_name_full else 0.0
-    concat_match = 1.0 if (s1_name_core and s23_name_core and 
-                           s1_name_core.replace(' ', '') == s23_name_core.replace(' ', '')) else 0.0
+    
+    s1_compact = s1_name_core.replace(' ', '')
+    s23_compact = s23_name_core.replace(' ', '')
+    concat_match = 1.0 if (s1_compact and s23_compact and s1_compact == s23_compact) else 0.0
+    
     prefix_match = 1.0 if (s1_name_core and s23_name_core and 
                           (s1_name_core.startswith(s23_name_core) or s23_name_core.startswith(s1_name_core))) else 0.0
 
-    # RapidFuzz / String distance ratios
+    len_diff = abs(len(s1_name_core) - len(s23_name_core)) / max(len(s1_name_core), len(s23_name_core), 1)
+
+    # String distance ratios
     if HAS_RAPIDFUZZ:
         ratio = fuzz.ratio(s1_name_core, s23_name_core) / 100.0
         token_sort_ratio = fuzz.token_sort_ratio(s1_name_full, s23_name_full) / 100.0
         token_set_ratio = fuzz.token_set_ratio(s1_name_full, s23_name_full) / 100.0
     else:
-        # Fallback ratio approximation using jaccard + overlap
         ratio = (name_jaccard + name_ngram_jaccard) / 2.0
         token_sort_ratio = name_overlap
         token_set_ratio = name_jaccard
 
     # Address features
-    has_address = 1.0 if (s1_addr and s23_addr) else 0.0
+    has_both_address = 1.0 if (s1_addr and s23_addr) else 0.0
     s1_addr_tokens = set(s1_addr.split())
     s23_addr_tokens = set(s23_addr.split())
     addr_jaccard = jaccard_similarity(s1_addr_tokens, s23_addr_tokens)
     
-    # Numeric / PIN / Door number overlap
+    # Numerical consistency (Crucial Precision Filter)
     s1_nums = extract_numbers(s1_addr)
     s23_nums = extract_numbers(s23_addr)
     addr_num_jaccard = jaccard_similarity(s1_nums, s23_nums)
+    
     addr_has_common_num = 1.0 if (s1_nums and s23_nums and len(s1_nums.intersection(s23_nums)) > 0) else 0.0
+    # Conflicting numbers: both have numbers, but NONE match (strong negative indicator)
+    addr_conflicting_num = 1.0 if (s1_nums and s23_nums and len(s1_nums.intersection(s23_nums)) == 0) else 0.0
 
     return {
         'name_jaccard': name_jaccard,
@@ -102,8 +110,10 @@ def compute_pairwise_features(
         'exact_full_match': exact_full_match,
         'concat_match': concat_match,
         'prefix_match': prefix_match,
-        'has_address': has_address,
+        'len_diff': len_diff,
+        'has_both_address': has_both_address,
         'addr_jaccard': addr_jaccard,
         'addr_num_jaccard': addr_num_jaccard,
-        'addr_has_common_num': addr_has_common_num
+        'addr_has_common_num': addr_has_common_num,
+        'addr_conflicting_num': addr_conflicting_num
     }

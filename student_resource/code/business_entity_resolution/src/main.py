@@ -52,8 +52,8 @@ def run_pipeline(
     output_dir: str,
     prefix: str = "test",
     limit: int = None,
-    threshold: float = 0.52,
-    max_candidates: int = 20
+    threshold: float = None,
+    max_candidates: int = 25
 ):
     resolved_data = resolve_data_dir(data_dir)
     resolved_output = resolve_output_dir(output_dir, resolved_data)
@@ -64,7 +64,6 @@ def run_pipeline(
     print(f"Output directory: {resolved_output}")
     print(f"Dataset prefix:   {prefix}")
     print(f"Entity limit:     {limit if limit else 'ALL (Full Run)'}")
-    print(f"Match threshold:  {threshold}")
     print("=" * 70)
 
     data_dir = resolved_data
@@ -73,7 +72,7 @@ def run_pipeline(
     
     # 1. Initialize candidate blocker and matcher
     blocker = InvertedIndexBlocker(max_candidates_per_entity=max_candidates)
-    model = EntityMatchingModel(threshold=threshold)
+    model = EntityMatchingModel(threshold=threshold if threshold is not None else 0.75)
     print(f"Active Match Decision Threshold: {model.threshold:.2f}")
 
     # 2. Index Source 2 and Source 3
@@ -177,7 +176,7 @@ def run_pipeline(
                     if sc >= model.threshold:
                         scored.append((sc, cand_id))
                 scored.sort(key=lambda x: x[0], reverse=True)
-                matched_ids = [cid for _, cid in scored[:5]]
+                matched_ids = [cid for _, cid in scored]
                 total_matches += len(matched_ids)
                 match_f.write(f"{e_id}\t{','.join(matched_ids)}\n")
                 s1_count += 1
@@ -224,8 +223,8 @@ if __name__ == "__main__":
     parser.add_argument("--output-dir", type=str, default="output", help="Path to write output TSVs")
     parser.add_argument("--prefix", type=str, default="test", choices=["test", "train"], help="Dataset file prefix")
     parser.add_argument("--limit", type=int, default=None, help="Optional limit on number of S1 entities to process")
-    parser.add_argument("--threshold", type=float, default=0.52, help="Decision threshold for matching")
-    parser.add_argument("--max-candidates", type=int, default=20, help="Maximum candidates to retrieve per entity")
+    parser.add_argument("--threshold", type=float, default=None, help="Decision threshold for matching (default: loaded from model)")
+    parser.add_argument("--max-candidates", type=int, default=25, help="Maximum candidates to retrieve per entity")
     args = parser.parse_args()
 
     run_pipeline(

@@ -99,10 +99,10 @@ def build_training_dataset(
     feature_names = [
         'name_jaccard', 'name_overlap', 'name_ngram_jaccard',
         'name_ratio', 'token_sort_ratio', 'token_set_ratio',
-        'exact_core_match', 'exact_full_match', 'concat_match',
-        'prefix_match', 'len_diff', 'has_both_address',
-        'addr_jaccard', 'addr_num_jaccard', 'addr_has_common_num',
-        'addr_conflicting_num'
+        'max_name_sim', 'exact_core_match', 'exact_full_match',
+        'concat_match', 'prefix_match', 'len_diff',
+        'has_both_address', 'addr_jaccard', 'addr_num_jaccard',
+        'addr_has_common_num', 'addr_conflicting_num', 'multi_tenant_conflict'
     ]
 
     X: List[List[float]] = []
@@ -207,7 +207,7 @@ def main():
     models_dir = os.path.abspath(os.path.join(script_dir, "..", "..", "..", "models"))
     os.makedirs(models_dir, exist_ok=True)
 
-    X, y, feature_names = build_training_dataset(train_dir, num_s1_entities=6000)
+    X, y, feature_names = build_training_dataset(train_dir, num_s1_entities=15000, max_negatives_per_entity=4)
     clf, best_threshold = train_and_optimize_threshold(X, y, feature_names)
 
     model_payload = {

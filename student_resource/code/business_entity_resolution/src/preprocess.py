@@ -19,6 +19,74 @@ DOMAIN_EXT_REGEX = re.compile(r'\.(?:com|org|net|in|fr|co|io|edu|gov|biz|info)\b
 PUNCT_REGEX = re.compile(r'[^\w\s]', re.UNICODE)
 # Multi-space collapse
 SPACE_REGEX = re.compile(r'\s+')
+# Acronym dot collapse: e.g. "C.I.T." -> "CIT", "I.B.M." -> "IBM"
+ACRONYM_DOT_REGEX = re.compile(r'(?<=\b[a-zA-Z])\.(?=[a-zA-Z]\b)')
+
+# Address & State Abbreviation Normalization Dictionary
+ADDR_ABBR_MAP = {
+    # Road / Street types
+    'rd': 'road',
+    'st': 'street',
+    'ave': 'avenue',
+    'av': 'avenue',
+    'blvd': 'boulevard',
+    'dr': 'drive',
+    'ln': 'lane',
+    'ct': 'court',
+    'pkwy': 'parkway',
+    'cir': 'circle',
+    'hwy': 'highway',
+    'ste': 'suite',
+    'apt': 'apartment',
+    'fl': 'floor',
+    'bldg': 'building',
+    # Indian address keywords
+    'opp': 'opposite',
+    'nr': 'near',
+    'ext': 'extension',
+    'extn': 'extension',
+    'hno': 'no',
+    'pl': 'plot',
+    # French street keywords
+    'bd': 'boulevard',
+    'r': 'rue',
+    # US State Abbreviations -> Full Names
+    'ny': 'new york',
+    'ca': 'california',
+    'tx': 'texas',
+    'fl': 'florida',
+    'il': 'illinois',
+    'pa': 'pennsylvania',
+    'oh': 'ohio',
+    'ga': 'georgia',
+    'nc': 'north carolina',
+    'mi': 'michigan',
+    'nj': 'new jersey',
+    'va': 'virginia',
+    'wa': 'washington',
+    'az': 'arizona',
+    'ma': 'massachusetts',
+    'tn': 'tennessee',
+    'mo': 'missouri',
+    'md': 'maryland',
+    'wi': 'wisconsin',
+    'mn': 'minnesota',
+    'co': 'colorado',
+    # Indian State Abbreviations -> Full Names
+    'up': 'uttar pradesh',
+    'mh': 'maharashtra',
+    'ka': 'karnataka',
+    'dl': 'delhi',
+    'wb': 'west bengal',
+    'mp': 'madhya pradesh',
+    'ap': 'andhra pradesh',
+    'ts': 'telangana',
+    'gj': 'gujarat',
+    'hr': 'haryana',
+    'pb': 'punjab',
+    'kl': 'kerala',
+    'rj': 'rajasthan'
+}
 
 # Pure Python Brahmic script transliterator mapping (covers Devanagari, Bengali, Gurmukhi, Gujarati, Tamil, Telugu, Kannada, Malayalam)
 INDIC_OFFSET_MAP = {
@@ -55,9 +123,15 @@ def transliterate_indic_to_latin(text: str) -> str:
     return ''.join(res)
 
 def normalize_text(text: str) -> str:
-    """Basic unicode normalization, transliteration, and lowercasing."""
+    """Basic unicode normalization, transliteration, acronym collapsing, and lowercasing."""
     if not isinstance(text, str) or not text.strip():
         return ""
+    # Remove unicode replacement / junk characters
+    text = text.replace('\ufffd', ' ')
+    # Expand ampersand to 'and'
+    text = text.replace('&', ' and ')
+    # Collapse acronym dots (e.g. C.I.T. -> CIT)
+    text = ACRONYM_DOT_REGEX.sub('', text)
     # Transliterate Indic scripts to Latin characters
     text = transliterate_indic_to_latin(text)
     # NFKD normalization to separate accents from base Latin characters (e.g. French accents: é -> e)
@@ -93,10 +167,28 @@ def clean_business_name(name: str) -> Tuple[str, str]:
     core_name = " ".join(core_tokens)
     return core_name, normalized
 
+CHARS_TO_SPACE = ',.-/#\t\r\n:;()[]{}*|\\&'
+ADDR_PUNCT_TRANS = str.maketrans(CHARS_TO_SPACE, ' ' * len(CHARS_TO_SPACE))
+
 def clean_address(address: str) -> str:
-    """Normalizes address string, transliterates non-Latin scripts, and removes noise."""
-    normalized = normalize_text(address)
-    return normalized
+    """Fast, C-accelerated address normalization with abbreviation and state expansion."""
+    if not isinstance(address, str) or not address:
+        return ""
+    # Remove junk characters
+    address = address.replace('\ufffd', ' ')
+    # Expand ampersand
+    address = address.replace('&', ' and ')
+    # Collapse acronym dots
+    address = ACRONYM_DOT_REGEX.sub('', address)
+    # Transliterate Indic scripts
+    address = transliterate_indic_to_latin(address)
+    # NFKD normalization for accents
+    address = unicodedata.normalize('NFKD', address)
+    # Instant character translation
+    address = address.lower().translate(ADDR_PUNCT_TRANS)
+    # Expand abbreviations (st -> street, ny -> new york, opp -> opposite, etc.)
+    tokens = [ADDR_ABBR_MAP.get(tok, tok) for tok in address.split()]
+    return " ".join(tokens)
 
 def clean_country(country: str) -> str:
     """Normalizes country string."""

@@ -80,9 +80,14 @@ def compute_pairwise_features(
         token_sort_ratio = fuzz.token_sort_ratio(s1_name_full, s23_name_full) / 100.0
         token_set_ratio = fuzz.token_set_ratio(s1_name_full, s23_name_full) / 100.0
     else:
-        ratio = (name_jaccard + name_ngram_jaccard) / 2.0
-        token_sort_ratio = name_overlap
-        token_set_ratio = name_jaccard
+        import difflib
+        ratio = difflib.SequenceMatcher(None, s1_name_core, s23_name_core).ratio()
+        s1_sorted = " ".join(sorted(s1_name_full.split()))
+        s23_sorted = " ".join(sorted(s23_name_full.split()))
+        token_sort_ratio = difflib.SequenceMatcher(None, s1_sorted, s23_sorted).ratio()
+        # token set overlap approximation
+        common_tokens = " ".join(sorted(set(s1_name_full.split()).intersection(set(s23_name_full.split()))))
+        token_set_ratio = max(ratio, difflib.SequenceMatcher(None, s1_sorted, common_tokens).ratio() if common_tokens else 0.0)
 
     # Address features
     has_both_address = 1.0 if (s1_addr and s23_addr) else 0.0
@@ -99,6 +104,19 @@ def compute_pairwise_features(
     # Conflicting numbers: both have numbers, but NONE match (strong negative indicator)
     addr_conflicting_num = 1.0 if (s1_nums and s23_nums and len(s1_nums.intersection(s23_nums)) == 0) else 0.0
 
+    # Best overall name similarity
+    max_name_sim = max(ratio, token_sort_ratio, token_set_ratio, name_overlap)
+
+    # Multi-tenant / Shared Building Conflict:
+    # Addresses are identical or highly overlapping, but names have near-zero similarity
+    multi_tenant_conflict = 1.0 if (
+        has_both_address > 0.5 and 
+        addr_jaccard >= 0.35 and 
+        max_name_sim < 0.35 and 
+        concat_match < 0.5 and 
+        exact_core_match < 0.5
+    ) else 0.0
+
     return {
         'name_jaccard': name_jaccard,
         'name_overlap': name_overlap,
@@ -106,6 +124,7 @@ def compute_pairwise_features(
         'name_ratio': ratio,
         'token_sort_ratio': token_sort_ratio,
         'token_set_ratio': token_set_ratio,
+        'max_name_sim': max_name_sim,
         'exact_core_match': exact_core_match,
         'exact_full_match': exact_full_match,
         'concat_match': concat_match,
@@ -115,5 +134,6 @@ def compute_pairwise_features(
         'addr_jaccard': addr_jaccard,
         'addr_num_jaccard': addr_num_jaccard,
         'addr_has_common_num': addr_has_common_num,
-        'addr_conflicting_num': addr_conflicting_num
+        'addr_conflicting_num': addr_conflicting_num,
+        'multi_tenant_conflict': multi_tenant_conflict
     }

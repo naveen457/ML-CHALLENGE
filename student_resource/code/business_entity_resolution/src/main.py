@@ -79,6 +79,12 @@ def run_pipeline(
     source2_path = os.path.join(data_dir, f"{prefix}_source2.tsv")
     source3_path = os.path.join(data_dir, f"{prefix}_source3.tsv")
 
+    try:
+        import polars as pl
+        has_polars = True
+    except ImportError:
+        has_polars = False
+
     for s_path in [source2_path, source3_path]:
         if not os.path.exists(s_path):
             print(f"Warning: File {s_path} not found. Skipping...")
@@ -87,30 +93,49 @@ def run_pipeline(
         print(f"\nIndexing records from: {os.path.basename(s_path)} ...")
         t0 = time.time()
         count = 0
-        with open(s_path, 'r', encoding='utf-8', errors='replace') as f:
-            header_line = f.readline()
-            for line in f:
-                parts = line.rstrip('\r\n').split('\t')
-                if len(parts) < 4:
-                    continue
-                e_id, b_name, b_addr, b_country = parts[0], parts[1], parts[2], parts[3]
-                
-                c_country = clean_country(b_country)
-                core_name, full_name = clean_business_name(b_name)
-                clean_addr = clean_address(b_addr)
-                
-                blocker.add_candidate(e_id, core_name, full_name, clean_addr, c_country)
+
+        if has_polars:
+            # High-throughput columnar ingestion via Polars (C++/Rust multi-threaded)
+            n_rows = (limit * 3) if limit else None
+            df = pl.read_csv(s_path, separator='\t', truncate_ragged_lines=True, n_rows=n_rows)
+            e_ids = df['entity_id'].to_list()
+            b_names = df['business_name'].to_list()
+            b_addrs = df['business_address'].to_list()
+            b_countries = df['country'].to_list()
+            del df # Free raw dataframe memory immediately
+
+            for i in range(len(e_ids)):
+                c_country = clean_country(b_countries[i])
+                core_name, full_name = clean_business_name(b_names[i])
+                clean_addr = clean_address(b_addrs[i])
+                blocker.add_candidate(e_ids[i], core_name, full_name, clean_addr, c_country)
                 count += 1
                 if count % 500000 == 0:
                     print(f"  Indexed {count:,} records ({time.time() - t0:.1f}s)")
-                if limit and count >= limit * 3:
-                    break
+        else:
+            # Streaming line-by-line fallback
+            with open(s_path, 'r', encoding='utf-8', errors='replace') as f:
+                header_line = f.readline()
+                for line in f:
+                    parts = line.rstrip('\r\n').split('\t')
+                    if len(parts) < 4:
+                        continue
+                    e_id, b_name, b_addr, b_country = parts[0], parts[1], parts[2], parts[3]
+                    c_country = clean_country(b_country)
+                    core_name, full_name = clean_business_name(b_name)
+                    clean_addr = clean_address(b_addr)
+                    blocker.add_candidate(e_id, core_name, full_name, clean_addr, c_country)
+                    count += 1
+                    if count % 500000 == 0:
+                        print(f"  Indexed {count:,} records ({time.time() - t0:.1f}s)")
+                    if limit and count >= limit * 3:
+                        break
         print(f"Done indexing {count:,} records in {time.time() - t0:.1f}s.")
 
     print("\nPruning high-frequency tokens from index...")
     blocker.prune_high_frequency_tokens()
 
-    # 3. Process Source 1 and generate matches
+    # 3. Process Source 1 out-of-core in chunks to maintain bounded RAM
     source1_path = os.path.join(data_dir, f"{prefix}_source1.tsv")
     if not os.path.exists(source1_path):
         raise FileNotFoundError(f"Source 1 file not found: {source1_path}")
@@ -123,30 +148,26 @@ def run_pipeline(
     s1_count = 0
     total_matches = 0
     total_candidates = 0
+    CHUNK_SIZE = 5000
 
-    with open(source1_path, 'r', encoding='utf-8', errors='replace') as s1_f, \
-         open(matching_tsv_path, 'w', encoding='utf-8', newline='') as match_f, \
+    with open(matching_tsv_path, 'w', encoding='utf-8', newline='') as match_f, \
          open(candidate_tsv_path, 'w', encoding='utf-8', newline='') as cand_f:
 
         # Write exact required headers
         match_f.write("source1_entity_id\tmatched_entity_ids\n")
         cand_f.write("source1_entity_id\tcandidate_entity_ids\n")
 
-        # Skip header
-        header_line = s1_f.readline()
-
-        BATCH_SIZE = 2500
-        batch_items = []
-
-        def flush_batch(items):
+        def process_chunk(e_ids, b_names, b_addrs, b_countries):
             nonlocal total_candidates, total_matches, s1_count
-            if not items:
-                return
-
             all_feats = []
             entity_cand_slices = []
 
-            for e_id, core_name, full_name, clean_addr, c_country in items:
+            for i in range(len(e_ids)):
+                e_id = e_ids[i]
+                c_country = clean_country(b_countries[i])
+                core_name, full_name = clean_business_name(b_names[i])
+                clean_addr = clean_address(b_addrs[i])
+
                 candidates = blocker.query(core_name, full_name, clean_addr, c_country)
                 cand_ids = [c[0] for c in candidates]
                 total_candidates += len(cand_ids)
@@ -166,7 +187,7 @@ def run_pipeline(
                 end_idx = len(all_feats)
                 entity_cand_slices.append((e_id, candidates, start_idx, end_idx))
 
-            # Batch score all candidates in one C++ matrix call
+            # Batch score all candidate pairs in one C++ matrix call
             all_scores = model.score_batch(all_feats)
 
             for e_id, candidates, start_idx, end_idx in entity_cand_slices:
@@ -180,33 +201,49 @@ def run_pipeline(
                 total_matches += len(matched_ids)
                 match_f.write(f"{e_id}\t{','.join(matched_ids)}\n")
                 s1_count += 1
-                if s1_count % 100000 == 0:
+                if s1_count % 10000 == 0:
                     print(f"  Processed {s1_count:,} S1 entities ({time.time() - t0:.1f}s) | Matches found: {total_matches:,}")
 
-        for line in s1_f:
-            parts = line.rstrip('\r\n').split('\t')
-            if not parts or not parts[0]:
-                continue
-                
-            e_id = parts[0]
-            b_name = parts[1] if len(parts) > 1 else ""
-            b_addr = parts[2] if len(parts) > 2 else ""
-            b_country = parts[3] if len(parts) > 3 else ""
+            # Flush immediately to disk to prevent buffered RAM buildup
+            match_f.flush()
+            cand_f.flush()
 
-            c_country = clean_country(b_country)
-            core_name, full_name = clean_business_name(b_name)
-            clean_addr = clean_address(b_addr)
+        # Out-of-core chunk streaming using Polars collect_batches
+        if has_polars:
+            s1_batches = pl.scan_csv(source1_path, separator='\t').collect_batches(chunk_size=CHUNK_SIZE)
+            for batch in s1_batches:
+                b_eids = batch['entity_id'].to_list()
+                b_names = batch['business_name'].to_list()
+                b_addrs = batch['business_address'].to_list()
+                b_countries = batch['country'].to_list()
+                del batch # Free batch memory immediately
 
-            batch_items.append((e_id, core_name, full_name, clean_addr, c_country))
-            if len(batch_items) >= BATCH_SIZE:
-                flush_batch(batch_items)
-                batch_items = []
+                if limit and s1_count + len(b_eids) > limit:
+                    cut = limit - s1_count
+                    b_eids, b_names, b_addrs, b_countries = b_eids[:cut], b_names[:cut], b_addrs[:cut], b_countries[:cut]
 
-            if limit and s1_count >= limit:
-                break
+                process_chunk(b_eids, b_names, b_addrs, b_countries)
 
-        if batch_items:
-            flush_batch(batch_items)
+                if limit and s1_count >= limit:
+                    break
+        else:
+            # Pandas / standard line chunk fallback
+            import pandas as pd
+            for chunk in pd.read_csv(source1_path, sep='\t', chunksize=CHUNK_SIZE, dtype=str, keep_default_na=False):
+                b_eids = chunk['entity_id'].tolist()
+                b_names = chunk['business_name'].tolist()
+                b_addrs = chunk['business_address'].tolist()
+                b_countries = chunk['country'].tolist()
+                del chunk
+
+                if limit and s1_count + len(b_eids) > limit:
+                    cut = limit - s1_count
+                    b_eids, b_names, b_addrs, b_countries = b_eids[:cut], b_names[:cut], b_addrs[:cut], b_countries[:cut]
+
+                process_chunk(b_eids, b_names, b_addrs, b_countries)
+
+                if limit and s1_count >= limit:
+                    break
 
     print("\n" + "=" * 70)
     print(f"Pipeline completed successfully in {time.time() - t0:.1f}s!")

@@ -1,4 +1,4 @@
-import sys
+import array
 from collections import defaultdict, Counter
 from typing import Dict, List, Tuple, Set, Iterator
 import re
@@ -45,13 +45,13 @@ def get_address_blocking_keys(addr_str: str) -> List[str]:
 class InvertedIndexBlocker:
     """
     High-Throughput Dual-Key (Name + Address Composite) candidate generator.
-    Indexes 10M records in ~2 minutes with low memory usage.
+    Uses compact 32-bit integer arrays (array.array('I')) for out-of-core memory efficiency.
     """
     def __init__(self, max_candidates_per_entity: int = 25, max_token_frequency: int = 5000):
         self.max_candidates = max_candidates_per_entity
         self.max_token_freq = max_token_frequency
-        # index: country -> token -> list of candidate record indices
-        self.country_indices: Dict[str, Dict[str, List[int]]] = defaultdict(lambda: defaultdict(list))
+        # index: country -> token -> compact 32-bit uint array (4 bytes vs 36 bytes in Python list)
+        self.country_indices: Dict[str, Dict[str, array.array]] = defaultdict(lambda: defaultdict(lambda: array.array('I')))
         # metadata store: country -> list of record tuples: (entity_id, core_name, full_name, addr)
         self.candidate_records: Dict[str, List[Tuple[str, str, str, str]]] = defaultdict(list)
 
